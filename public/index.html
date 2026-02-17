@@ -546,13 +546,52 @@
     overflow: hidden;
   }
 
-  .modal-img-side img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .img-zoom-wrapper {
+    position: absolute;
+    inset: 0;
+    transform-origin: center center;
+    transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: transform;
+  }
+
+  .img-zoom-wrapper img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
 
   .modal-canvas {
     position: absolute;
     inset: 0;
     pointer-events: none;
   }
+
+  .zoom-btn {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    display: none;
+    align-items: center;
+    gap: 6px;
+    background: rgba(13,17,23,0.88);
+    border: 1px solid var(--border-active);
+    border-radius: 6px;
+    color: var(--accent);
+    padding: 6px 12px;
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    z-index: 10;
+    transition: background 0.15s, box-shadow 0.15s;
+    user-select: none;
+  }
+
+  .zoom-btn:hover { background: rgba(33,136,216,0.18); box-shadow: 0 0 0 1px var(--accent); }
+
+  .modal-img-side.has-detail { cursor: zoom-in; }
+  .modal-img-side.zoomed { cursor: zoom-out; }
 
   .modal-info-side {
     width: 320px;
@@ -814,9 +853,17 @@
       </button>
     </div>
     <div class="modal-body">
-      <div class="modal-img-side">
-        <img id="modalImg" src="" alt="">
-        <canvas class="modal-canvas" id="modalCanvas"></canvas>
+      <div class="modal-img-side" id="modalImgSide" onclick="handleImgSideClick(event)">
+        <div class="img-zoom-wrapper" id="imgZoomWrapper">
+          <img id="modalImg" src="" alt="">
+          <canvas class="modal-canvas" id="modalCanvas"></canvas>
+        </div>
+        <button class="zoom-btn" id="zoomBtn" onclick="handleZoomBtnClick(event)">
+          <svg id="zoomBtnIcon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/>
+          </svg>
+          <span id="zoomBtnLabel">Zoom to detail</span>
+        </button>
       </div>
       <div class="modal-info-side">
         <div class="info-section">
@@ -868,6 +915,8 @@ let projects = [];
 let currentProjectId = null;
 let currentDetail = null;
 let searchTimeout = null;
+let zoomActive = false;
+let currentHighlightRegion = null;
 
 // ============================================================
 // INIT
@@ -1105,6 +1154,7 @@ function renderResults(results, q) {
 // DETAIL MODAL
 // ============================================================
 function openDetail(detail, searchQuery) {
+  resetZoomState();
   currentDetail = detail;
   document.getElementById('modalTitle').textContent = detail.sheetTitle || 'Detail Sheet';
   document.getElementById('modalProject').textContent = detail.projectName || '—';
@@ -1146,6 +1196,7 @@ function openDetail(detail, searchQuery) {
 function closeModal() {
   document.getElementById('detailModal').classList.remove('open');
   clearCanvas();
+  resetZoomState();
 }
 
 function setupCanvas(detail, searchQuery) {
@@ -1217,6 +1268,92 @@ function highlightDetail(idx) {
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 12px "Barlow", sans-serif';
   ctx.fillText(detail.title, x + 10, y + 20);
+
+  // Store region for zoom and show the zoom button
+  currentHighlightRegion = { x: x + 4, y: y + 4, w: w - 8, h: h - 8 };
+  const zoomBtn = document.getElementById('zoomBtn');
+  zoomBtn.style.display = 'flex';
+  const imgSide = document.getElementById('modalImgSide');
+  if (zoomActive) {
+    applyZoom(); // update zoom target if already zoomed
+  } else {
+    imgSide.classList.add('has-detail');
+    imgSide.classList.remove('zoomed');
+  }
+}
+
+// ============================================================
+// ZOOM
+// ============================================================
+function handleImgSideClick(e) {
+  if (currentHighlightRegion) toggleZoom();
+}
+
+function handleZoomBtnClick(e) {
+  e.stopPropagation(); // prevent double-firing with imgSide click
+  toggleZoom();
+}
+
+function toggleZoom() {
+  zoomActive = !zoomActive;
+  const imgSide = document.getElementById('modalImgSide');
+  const icon = document.getElementById('zoomBtnIcon');
+  const label = document.getElementById('zoomBtnLabel');
+
+  if (zoomActive) {
+    applyZoom();
+    // Switch to zoom-out icon (minus inside circle)
+    icon.innerHTML = '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M8 11h6"/>';
+    label.textContent = 'Zoom out';
+    imgSide.classList.add('zoomed');
+    imgSide.classList.remove('has-detail');
+  } else {
+    resetZoom();
+    // Switch back to zoom-in icon (plus inside circle)
+    icon.innerHTML = '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/>';
+    label.textContent = 'Zoom to detail';
+    imgSide.classList.remove('zoomed');
+    imgSide.classList.add('has-detail');
+  }
+}
+
+function applyZoom() {
+  if (!currentHighlightRegion) return;
+  const { x, y, w, h } = currentHighlightRegion;
+  const wrapper = document.getElementById('imgZoomWrapper');
+  const container = document.getElementById('modalImgSide');
+  const W = container.offsetWidth;
+  const H = container.offsetHeight;
+
+  // Scale so the region fills most of the container
+  const scale = Math.min(W / w, H / h) * 0.88;
+
+  // Set transform-origin to center of the region (as % of wrapper)
+  const cx = ((x + w / 2) / W) * 100;
+  const cy = ((y + h / 2) / H) * 100;
+
+  wrapper.style.transformOrigin = `${cx}% ${cy}%`;
+  wrapper.style.transform = `scale(${scale})`;
+}
+
+function resetZoom() {
+  const wrapper = document.getElementById('imgZoomWrapper');
+  wrapper.style.transform = 'scale(1)';
+  wrapper.style.transformOrigin = 'center center';
+}
+
+function resetZoomState() {
+  zoomActive = false;
+  currentHighlightRegion = null;
+  resetZoom();
+  const btn = document.getElementById('zoomBtn');
+  btn.style.display = 'none';
+  const imgSide = document.getElementById('modalImgSide');
+  imgSide.classList.remove('has-detail', 'zoomed');
+  const icon = document.getElementById('zoomBtnIcon');
+  const label = document.getElementById('zoomBtnLabel');
+  icon.innerHTML = '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/>';
+  label.textContent = 'Zoom to detail';
 }
 
 // ============================================================
