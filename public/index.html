@@ -549,8 +549,8 @@
   .img-zoom-wrapper {
     position: absolute;
     inset: 0;
-    transform-origin: center center;
-    transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    transform-origin: top left;
+    transition: transform 0.12s ease-out;
     will-change: transform;
   }
 
@@ -567,31 +567,46 @@
     pointer-events: none;
   }
 
-  .zoom-btn {
+  .zoom-controls {
     position: absolute;
     bottom: 12px;
     right: 12px;
-    display: none;
+    display: flex;
     align-items: center;
     gap: 6px;
+    z-index: 10;
+  }
+
+  .zoom-btn {
     background: rgba(13,17,23,0.88);
     border: 1px solid var(--border-active);
     border-radius: 6px;
     color: var(--accent);
-    padding: 6px 12px;
+    padding: 6px 10px;
     font-family: var(--sans);
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
-    z-index: 10;
     transition: background 0.15s, box-shadow 0.15s;
     user-select: none;
   }
 
   .zoom-btn:hover { background: rgba(33,136,216,0.18); box-shadow: 0 0 0 1px var(--accent); }
 
-  .modal-img-side.has-detail { cursor: zoom-in; }
-  .modal-img-side.zoomed { cursor: zoom-out; }
+  .zoom-level {
+    min-width: 62px;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: #fff;
+    background: rgba(13,17,23,0.88);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+  }
+
+  .modal-img-side.has-detail { cursor: grab; }
+  .modal-img-side.panning { cursor: grabbing; }
 
   .modal-info-side {
     width: 320px;
@@ -858,12 +873,13 @@
           <img id="modalImg" src="" alt="">
           <canvas class="modal-canvas" id="modalCanvas"></canvas>
         </div>
-        <button class="zoom-btn" id="zoomBtn" onclick="handleZoomBtnClick(event)">
-          <svg id="zoomBtnIcon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/>
-          </svg>
-          <span id="zoomBtnLabel">Zoom to detail</span>
-        </button>
+        <div class="zoom-controls">
+          <button class="zoom-btn" id="zoomToDetailBtn" onclick="zoomToDetail(event)">Zoom to detail</button>
+          <button class="zoom-btn" onclick="stepZoom(event, -1)">−</button>
+          <div class="zoom-level" id="zoomLevel">100%</div>
+          <button class="zoom-btn" onclick="stepZoom(event, 1)">+</button>
+          <button class="zoom-btn" onclick="resetZoom(event)">Reset</button>
+        </div>
       </div>
       <div class="modal-info-side">
         <div class="info-section">
@@ -915,8 +931,17 @@ let projects = [];
 let currentProjectId = null;
 let currentDetail = null;
 let searchTimeout = null;
-let zoomActive = false;
 let currentHighlightRegion = null;
+const viewerState = {
+  scale: 1,
+  minScale: 0.5,
+  maxScale: 8,
+  translateX: 0,
+  translateY: 0,
+  isPanning: false,
+  panStartX: 0,
+  panStartY: 0,
+};
 
 // ============================================================
 // INIT
@@ -1204,6 +1229,12 @@ function setupCanvas(detail, searchQuery) {
   const img = document.getElementById('modalImg');
   canvas.width = img.offsetWidth;
   canvas.height = img.offsetHeight;
+  const imgSide = document.getElementById('modalImgSide');
+  if (!imgSide.dataset.viewerBound) {
+    bindViewerInteractions();
+    imgSide.dataset.viewerBound = 'true';
+  }
+  resetPanZoom();
 }
 
 function clearCanvas() {
@@ -1269,91 +1300,139 @@ function highlightDetail(idx) {
   ctx.font = 'bold 12px "Barlow", sans-serif';
   ctx.fillText(detail.title, x + 10, y + 20);
 
-  // Store region for zoom and show the zoom button
+  // Store region for zoom and enable quick jump
   currentHighlightRegion = { x: x + 4, y: y + 4, w: w - 8, h: h - 8 };
-  const zoomBtn = document.getElementById('zoomBtn');
-  zoomBtn.style.display = 'flex';
-  const imgSide = document.getElementById('modalImgSide');
-  if (zoomActive) {
-    applyZoom(); // update zoom target if already zoomed
-  } else {
-    imgSide.classList.add('has-detail');
-    imgSide.classList.remove('zoomed');
-  }
+  document.getElementById('modalImgSide').classList.add('has-detail');
 }
 
 // ============================================================
-// ZOOM
+// ZOOM / PAN VIEWER
 // ============================================================
+function bindViewerInteractions() {
+  const imgSide = document.getElementById('modalImgSide');
+  imgSide.addEventListener('wheel', handleZoomWheel, { passive: false });
+  imgSide.addEventListener('mousedown', startPan);
+  window.addEventListener('mousemove', onPanMove);
+  window.addEventListener('mouseup', endPan);
+}
+
 function handleImgSideClick(e) {
-  if (currentHighlightRegion) toggleZoom();
+  if (!currentHighlightRegion) return;
+  zoomToDetail(e);
 }
 
-function handleZoomBtnClick(e) {
-  e.stopPropagation(); // prevent double-firing with imgSide click
-  toggleZoom();
+function handleZoomWheel(e) {
+  e.preventDefault();
+  const direction = e.deltaY < 0 ? 1 : -1;
+  const nextScale = viewerState.scale * (direction > 0 ? 1.12 : 0.88);
+  zoomToScale(nextScale, e.clientX, e.clientY);
 }
 
-function toggleZoom() {
-  zoomActive = !zoomActive;
-  const imgSide = document.getElementById('modalImgSide');
-  const icon = document.getElementById('zoomBtnIcon');
-  const label = document.getElementById('zoomBtnLabel');
-
-  if (zoomActive) {
-    applyZoom();
-    // Switch to zoom-out icon (minus inside circle)
-    icon.innerHTML = '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M8 11h6"/>';
-    label.textContent = 'Zoom out';
-    imgSide.classList.add('zoomed');
-    imgSide.classList.remove('has-detail');
-  } else {
-    resetZoom();
-    // Switch back to zoom-in icon (plus inside circle)
-    icon.innerHTML = '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/>';
-    label.textContent = 'Zoom to detail';
-    imgSide.classList.remove('zoomed');
-    imgSide.classList.add('has-detail');
-  }
+function stepZoom(e, direction) {
+  e.stopPropagation();
+  const nextScale = viewerState.scale * (direction > 0 ? 1.18 : 0.82);
+  zoomToScale(nextScale);
 }
 
-function applyZoom() {
+function zoomToScale(nextScale, pointerClientX, pointerClientY) {
+  const container = document.getElementById('modalImgSide');
+  const rect = container.getBoundingClientRect();
+  const clampedScale = Math.max(viewerState.minScale, Math.min(viewerState.maxScale, nextScale));
+  const prevScale = viewerState.scale;
+  if (Math.abs(prevScale - clampedScale) < 0.0001) return;
+
+  const focalX = pointerClientX !== undefined ? pointerClientX - rect.left : rect.width / 2;
+  const focalY = pointerClientY !== undefined ? pointerClientY - rect.top : rect.height / 2;
+
+  const imageX = (focalX - viewerState.translateX) / prevScale;
+  const imageY = (focalY - viewerState.translateY) / prevScale;
+
+  viewerState.scale = clampedScale;
+  viewerState.translateX = focalX - imageX * clampedScale;
+  viewerState.translateY = focalY - imageY * clampedScale;
+
+  clampPan();
+  renderPanZoom();
+}
+
+function zoomToDetail(e) {
+  if (e) e.stopPropagation();
   if (!currentHighlightRegion) return;
   const { x, y, w, h } = currentHighlightRegion;
-  const wrapper = document.getElementById('imgZoomWrapper');
   const container = document.getElementById('modalImgSide');
   const W = container.offsetWidth;
   const H = container.offsetHeight;
 
-  // Scale so the region fills most of the container
-  const scale = Math.min(W / w, H / h) * 0.88;
+  const scale = Math.max(viewerState.minScale, Math.min(viewerState.maxScale, Math.min(W / w, H / h) * 0.88));
+  const centerX = x + w / 2;
+  const centerY = y + h / 2;
 
-  // Set transform-origin to center of the region (as % of wrapper)
-  const cx = ((x + w / 2) / W) * 100;
-  const cy = ((y + h / 2) / H) * 100;
+  viewerState.scale = scale;
+  viewerState.translateX = W / 2 - centerX * scale;
+  viewerState.translateY = H / 2 - centerY * scale;
 
-  wrapper.style.transformOrigin = `${cx}% ${cy}%`;
-  wrapper.style.transform = `scale(${scale})`;
+  clampPan();
+  renderPanZoom();
 }
 
-function resetZoom() {
+function startPan(e) {
+  if (e.button !== 0) return;
+  if (viewerState.scale <= 1.01) return;
+  const imgSide = document.getElementById('modalImgSide');
+  viewerState.isPanning = true;
+  viewerState.panStartX = e.clientX - viewerState.translateX;
+  viewerState.panStartY = e.clientY - viewerState.translateY;
+  imgSide.classList.add('panning');
+}
+
+function onPanMove(e) {
+  if (!viewerState.isPanning) return;
+  viewerState.translateX = e.clientX - viewerState.panStartX;
+  viewerState.translateY = e.clientY - viewerState.panStartY;
+  clampPan();
+  renderPanZoom();
+}
+
+function endPan() {
+  if (!viewerState.isPanning) return;
+  viewerState.isPanning = false;
+  document.getElementById('modalImgSide').classList.remove('panning');
+}
+
+function clampPan() {
+  const container = document.getElementById('modalImgSide');
   const wrapper = document.getElementById('imgZoomWrapper');
-  wrapper.style.transform = 'scale(1)';
-  wrapper.style.transformOrigin = 'center center';
+  const scaledW = wrapper.offsetWidth * viewerState.scale;
+  const scaledH = wrapper.offsetHeight * viewerState.scale;
+  const minX = Math.min(0, container.clientWidth - scaledW);
+  const minY = Math.min(0, container.clientHeight - scaledH);
+  viewerState.translateX = Math.min(0, Math.max(minX, viewerState.translateX));
+  viewerState.translateY = Math.min(0, Math.max(minY, viewerState.translateY));
+}
+
+function renderPanZoom() {
+  const wrapper = document.getElementById('imgZoomWrapper');
+  wrapper.style.transform = `translate(${viewerState.translateX}px, ${viewerState.translateY}px) scale(${viewerState.scale})`;
+  document.getElementById('zoomLevel').textContent = `${Math.round(viewerState.scale * 100)}%`;
+}
+
+function resetPanZoom() {
+  viewerState.scale = 1;
+  viewerState.translateX = 0;
+  viewerState.translateY = 0;
+  viewerState.isPanning = false;
+  renderPanZoom();
+}
+
+function resetZoom(e) {
+  if (e) e.stopPropagation();
+  resetPanZoom();
 }
 
 function resetZoomState() {
-  zoomActive = false;
   currentHighlightRegion = null;
-  resetZoom();
-  const btn = document.getElementById('zoomBtn');
-  btn.style.display = 'none';
-  const imgSide = document.getElementById('modalImgSide');
-  imgSide.classList.remove('has-detail', 'zoomed');
-  const icon = document.getElementById('zoomBtnIcon');
-  const label = document.getElementById('zoomBtnLabel');
-  icon.innerHTML = '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/>';
-  label.textContent = 'Zoom to detail';
+  resetPanZoom();
+  document.getElementById('modalImgSide').classList.remove('has-detail', 'panning');
 }
 
 // ============================================================
